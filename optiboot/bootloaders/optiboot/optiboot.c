@@ -279,10 +279,10 @@ asm("  .section .version\n"
 #endif
 #else // 0
 #if (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 > 250
-#error Unachievable baud rate (too slow) BAUD_RATE 
+#error Unachievable baud rate (too slow) BAUD_RATE
 #endif // baud rate slow check
 #if (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 < 3
-#error Unachievable baud rate (too fast) BAUD_RATE 
+#error Unachievable baud rate (too fast) BAUD_RATE
 #endif // baud rate fastn check
 #endif
 
@@ -310,7 +310,10 @@ void putch(char);
 uint8_t getch(void);
 static inline void getNch(uint8_t); /* "static inline" is a compiler hint to reduce code size */
 void verifySpace();
+#if LED_START_FLASHES > 0
 static inline void flash_led(uint8_t);
+static inline void led2();
+#endif
 uint8_t getLen();
 static inline void watchdogReset();
 void watchdogConfig(uint8_t x);
@@ -320,7 +323,23 @@ void uartDelay() __attribute__ ((naked));
 void wait_timeout(void) __attribute__ ((__noreturn__));
 void appStart(uint8_t rstFlags) __attribute__ ((naked))  __attribute__ ((__noreturn__));
 #ifdef RADIO_UART
-static void radio_init(void);
+static int radio_init(void);
+#endif
+
+#ifdef RADIO_UART
+static uint8_t radio_mode = 0;
+static uint8_t radio_present = 0;
+static uint8_t pkt_max_len = 32;
+
+#define CE_DDR		DDRB
+#define CE_PORT		PORTB
+#define CSN_DDR		DDRB
+#define CSN_PORT	PORTB
+#define CE_PIN		(1 << 0)
+#define CSN_PIN		(1 << 2)
+
+#include "spi.h"
+#include "nrf24.h"
 #endif
 
 /*
@@ -549,16 +568,14 @@ int main(void) {
   UART_SRL = (uint8_t)( (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 );
 #endif
 #endif
-#ifdef RADIO_UART
-  radio_init();
-#endif
 
   // Set up watchdog to trigger after 500ms
-  watchdogConfig(WATCHDOG_1S);
+  watchdogConfig(WATCHDOG_4S);
 
 #if (LED_START_FLASHES > 0) || defined(LED_DATA_FLASH)
   /* Set LED pin as output */
   LED_DDR |= _BV(LED);
+  LED_DDR |= _BV(LED2);
 #endif
 
 #ifdef SOFT_UART
@@ -566,13 +583,46 @@ int main(void) {
   UART_DDR |= _BV(UART_TX_BIT);
 #endif
 
+#ifdef RADIO_UART
+  flash_led(2);
+  if (!radio_init()) {
+    while (1);
+  }
+#endif
+
+
 #if LED_START_FLASHES > 0
   /* Flash onboard LED to signal entering of bootloader */
   flash_led(LED_START_FLASHES * 2);
 #endif
 
+#if 0
+  static uint8_t pkt_len = 0;
+  static uint8_t pkt_buf[32];
+  // while (nrf24_rx_fifo_data()) {
+  //   nrf24_rx_read(pkt_buf, &pkt_len);
+  // }
+
+  pkt_buf[0] = 'h';
+  pkt_buf[1] = 'e';
+  pkt_buf[2] = 'l';
+  pkt_buf[3] = 'l';
+  pkt_buf[4] = 'o';
+  for (;;) {
+    nrf24_tx(pkt_buf, 5);
+    nrf24_tx_result_wait();
+    if (nrf24_rx_fifo_data()) {
+      nrf24_rx_read(pkt_buf, &pkt_len);
+    }
+    my_delay(5);
+    watchdogReset();
+    //flash_led(1);
+  }
+#endif
+
   /* Forever loop */
   for (;;) {
+
     /* get character from UART */
     ch = getch();
 
@@ -580,18 +630,18 @@ int main(void) {
       unsigned char which = getch();
       verifySpace();
       if (which == 0x82) {
-	/*
-	 * Send optiboot version as "minor SW version"
-	 */
-	putch(OPTIBOOT_MINVER);
+        /*
+        * Send optiboot version as "minor SW version"
+        */
+	      putch(OPTIBOOT_MINVER);
       } else if (which == 0x81) {
-	  putch(OPTIBOOT_MAJVER);
+	       putch(OPTIBOOT_MAJVER);
       } else {
-	/*
-	 * GET PARAMETER returns a generic 0x03 reply for
-         * other parameters - enough to keep Avrdude happy
-	 */
-	putch(0x03);
+        /*
+        * GET PARAMETER returns a generic 0x03 reply for
+              * other parameters - enough to keep Avrdude happy
+        */
+      	putch(0x03);
       }
     }
     else if(ch == STK_SET_DEVICE) {
@@ -626,7 +676,6 @@ int main(void) {
       uint8_t *bufPtr;
       uint16_t addrPtr;
       uint8_t type;
-
       getch();			/* getlen() */
       length = getch();
       type = getch();
@@ -641,6 +690,7 @@ int main(void) {
       bufPtr = buff;
       do *bufPtr++ = getch();
       while (--length);
+
 
 #ifdef SUPPORT_EEPROM
       if (type == 'F') {	/* Flash */
@@ -788,43 +838,43 @@ int main(void) {
  * we'd encrypt all communication but that would be an overkill for the
  * bootloader.
  */
-static uint8_t radio_mode = 0;
-static uint8_t radio_present = 0;
-static uint8_t pkt_max_len = 32;
-
-#define CE_DDR		DDRC
-#define CE_PORT		PORTC
-#define CSN_DDR		DDRB
-#define CSN_PORT	PORTB
-#define CE_PIN		(1 << 1)
-#define CSN_PIN		(1 << 2)
-
-#include "spi.h"
-#include "nrf24.h"
 
 #define SEQN
 
-static void radio_init(void) {
-  uint8_t addr[3];
+static int radio_init(void) {
+  uint8_t addr[5];
 
   spi_init();
 
-  if (nrf24_init())
-    return;
+  radio_present = 0;
+  if (!nrf24_init()) {
+    radio_present = 1;
+  }
 
-  radio_present = 1;
+  if (!radio_present)
+    return 0;
+
   /*
    * Set our own address.
    *
    * The remote end's address will be set according to the contents
    * of the first packet we receive from the master.
    */
-  addr[0] = eeprom_read(0);
-  addr[1] = eeprom_read(1);
-  addr[2] = eeprom_read(2);
+  addr[0] = 0x02;
+  addr[1] = 0x02;
+  addr[2] = 0x02;
+  addr[3] = 0x02;
+  addr[4] = 0x02;
   nrf24_set_rx_addr(addr);
+  addr[0] = 0x01;
+  addr[1] = 0x01;
+  addr[2] = 0x01;
+  addr[3] = 0x01;
+  addr[4] = 0x01;
+  nrf24_set_tx_addr(addr);
 
   nrf24_rx_mode();
+  return 1;
 }
 #endif
 
@@ -849,23 +899,29 @@ void putch(char ch) {
           break;
 
         /*
-	 * TODO: also check if there's anything in the Rx FIFO - that
-	 * would indicate that the other side has actually received our
-	 * packet but the ACK may have been lost instead.  In any case
-	 * the other side is not listening for what we're re-sending,
-	 * maybe has given up and is resending the full command which
-	 * is ok.
-	 */
+        * TODO: also check if there's anything in the Rx FIFO - that
+        * would indicate that the other side has actually received our
+        * packet but the ACK may have been lost instead.  In any case
+        * the other side is not listening for what we're re-sending,
+        * maybe has given up and is resending the full command which
+        * is ok.
+        */
       }
 
       pkt_len = 1;
       pkt_buf[0] ++;
 #else
-      /* Wait 4ms to allow the remote end to switch to Rx mode */
+      // /* Wait 4ms to allow the remote end to switch to Rx mode */
       my_delay(4);
-
-      nrf24_tx(pkt_buf, pkt_len);
-      nrf24_tx_result_wait();
+      uint8_t cnt = 5;
+      while (--cnt) {
+          nrf24_tx(pkt_buf, pkt_len);
+          if (nrf24_tx_result_wait() < 0) {
+            my_delay(4);
+            continue;
+          }
+          break;
+      }
 
       pkt_len = 0;
 #endif
@@ -974,8 +1030,11 @@ uint8_t getch(void) {
 #endif
         nrf24_rx_read(pkt_buf, &pkt_len);
         pkt_start = START;
+        radio_mode = 1;
 
-        if (!radio_mode && pkt_len >= 4) {
+        #if 0
+        if (0 && !radio_mode && pkt_len >= 4) {
+        //if (!radio_mode && pkt_len >= 4) {
           /*
            * If this is the first packet we receive, the first three bytes
            * should contain the sender's address.
@@ -988,6 +1047,7 @@ uint8_t getch(void) {
           radio_mode = 1;
         } else if (!radio_mode)
           pkt_len = 0;
+        #endif
 
         if (!pkt_len)
           continue;
@@ -1074,6 +1134,14 @@ void flash_led(uint8_t count) {
 #endif
     watchdogReset();
   } while (--count);
+}
+
+void led2() {
+#if defined(__AVR_ATmega8__)  || defined (__AVR_ATmega32__)
+    LED_PORT ^= _BV(LED2);
+#else
+    LED_PIN |= _BV(LED2);
+#endif
 }
 #endif
 

@@ -12,6 +12,7 @@ static inline void nrf24_csn(uint8_t level) {
 		CSN_PORT &= ~CSN_PIN;
 }
 
+#if 1
 static void delay8(uint16_t count) {
 	while (count --)
 		__asm__ __volatile__ (
@@ -27,6 +28,53 @@ static void delay8(uint16_t count) {
 }
 #ifndef TIMER
 #define my_delay(msec) delay8((int) (F_CPU / 8000L * (msec)))
+#endif
+
+#else
+volatile unsigned long timer0_overflow_count = 0;
+#define clockCyclesPerMicrosecond() ( F_CPU / 1000000L )
+
+static unsigned long micros() {
+	unsigned long m;
+	uint8_t oldSREG = SREG, t;
+
+	__asm__ __volatile__ ("cli");
+	m = timer0_overflow_count;
+#if defined(TCNT0)
+	t = TCNT0;
+#elif defined(TCNT0L)
+	t = TCNT0L;
+#else
+	#error TIMER 0 not defined
+#endif
+
+#ifdef TIFR0
+	if ((TIFR0 & _BV(TOV0)) && (t < 255))
+		m++;
+#else
+	if ((TIFR & _BV(TOV0)) && (t < 255))
+		m++;
+#endif
+
+	SREG = oldSREG;
+
+	return ((m << 8) + t) * (64 / clockCyclesPerMicrosecond());
+}
+
+static void delay(unsigned long ms)
+{
+	uint32_t start = micros();
+
+	while (ms > 0) {
+		while ( ms > 0 && (micros() - start) >= 1000) {
+			ms--;
+			start += 1000;
+		}
+	}
+}
+
+#undef my_delay
+#define my_delay delay
 #endif
 
 static inline void nrf24_ce(uint8_t level) {
@@ -104,13 +152,15 @@ static uint8_t nrf24_read_status(void) {
 	return ret;
 }
 
-static void nrf24_write_addr_reg(uint8_t addr, uint8_t value[3]) {
+static void nrf24_write_addr_reg(uint8_t addr, uint8_t value[5]) {
 	nrf24_csn(0);
 
 	spi_transfer(addr | W_REGISTER);
 	spi_transfer(value[0]);
 	spi_transfer(value[1]);
 	spi_transfer(value[2]);
+	spi_transfer(value[3]);
+	spi_transfer(value[4]);
 
 	nrf24_csn(1);
 }
@@ -151,27 +201,27 @@ static int nrf24_init(void) {
 
 	/* Maximum Tx power, 250kbps data rate */
 	nrf24_write_reg(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) |
-			(1 << RF_DR_LOW));
+			(1 << RF_DR_HIGH));
 	/* Dynamic payload length for TX & RX (pipes 0 and 1) */
 	nrf24_write_reg(DYNPD, 0x03);
 	nrf24_write_reg(FEATURE, 1 << EN_DPL);
 	/* Reset status bits */
 	nrf24_write_reg(STATUS, (1 << RX_DR) | (1 << TX_DS) | (1 << MAX_RT));
 	/* Set some RF channel number */
-	nrf24_write_reg(RF_CH, 42);
+	nrf24_write_reg(RF_CH, 98);
 	/* 3-byte addresses */
-	nrf24_write_reg(SETUP_AW, 0x01);
+	//nrf24_write_reg(SETUP_AW, 0x01);
 	/* Enable ACKing on both pipe 0 & 1 for TX & RX ACK support */
 	nrf24_write_reg(EN_AA, 0x03);
 
 	return 0;
 }
 
-static void nrf24_set_rx_addr(uint8_t addr[3]) {
+static void nrf24_set_rx_addr(uint8_t addr[5]) {
 	nrf24_write_addr_reg(RX_ADDR_P1, addr);
 }
 
-static void nrf24_set_tx_addr(uint8_t addr[3]) {
+static void nrf24_set_tx_addr(uint8_t addr[5]) {
 	nrf24_write_addr_reg(TX_ADDR, addr);
 	/* The pipe 0 address is the address we listen on for ACKs */
 	nrf24_write_addr_reg(RX_ADDR_P0, addr);
@@ -304,14 +354,14 @@ static int nrf24_tx_result_wait(void) {
 
 	status = nrf24_read_status();
 
-	/* Reset CE early so that a new Tx or Rx op can start sooner. */
-	nrf24_ce(0);
-
 	while ((!(status & (1 << TX_DS)) || (status & (1 << TX_FULL))) &&
 			!(status & (1 << MAX_RT)) && --count) {
-		delay8((int) (F_CPU / 8000L * 0.01));
+		//delay8((int) (F_CPU / 8000L * 0.01));
+		my_delay(10);
 		status = nrf24_read_status();
 	}
+
+	nrf24_ce(0);
 
 	/* Reset status bits */
 	nrf24_write_reg(STATUS, (1 << MAX_RT) | (1 << TX_DS));

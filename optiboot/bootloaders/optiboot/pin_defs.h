@@ -5,7 +5,8 @@
 /* Onboard LED is connected to pin PB5 in Arduino NG, Diecimila, and Duemilanove
  */ 
 #if !defined(LED)
-#define LED B5
+#define LED D5
+#define LED2 D6
 #endif
 
 /* Ports for soft UART */
