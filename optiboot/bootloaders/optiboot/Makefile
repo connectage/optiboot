@@ -153,11 +153,11 @@ endif
 # TODO: we should actuall just use avr-size and select an address automatically.
 TEXT_START = e00
 
-# BIG_BOOT: Include extra features, up to 1K.
+# BIG_BOOT: Include extra features, up to 2K.
 ifdef BIGBOOT
 BIGBOOT_CMD = -DBIGBOOT=1
 dummy = FORCE
-TEXT_START = 900
+TEXT_START = 000
 endif
 
 ifdef SOFT_UART

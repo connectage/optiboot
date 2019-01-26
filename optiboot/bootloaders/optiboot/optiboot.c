@@ -19,7 +19,6 @@
 /*   Written almost entirely in C                         */
 /*   Customisable timeout with accurate timeconstant      */
 /*   Optional virtual UART. No hardware UART required.    */
-/*   Optional virtual boot partition for devices without. */
 /*                                                        */
 /* What you lose:                                         */
 /*   Implements a skeleton STK500 protocol which is       */
@@ -156,8 +155,11 @@
 /**********************************************************/
 
 /**********************************************************/
-/* Edit History:					  */
-/*							  */
+/* Edit History:					                                */
+/*							                                          */
+/* Jan 2019                                               */
+/* 6.0 Connectage/mathieu:                                */
+/*   Remove SOFT_UART, VIRTUALBOOT, RADIO_UART, SEQN      */
 /* Mar 2013                                               */
 /* 5.0 WestfW: Major Makefile restructuring.              */
 /*             See Makefile and pin_defs.h                */
@@ -264,27 +266,12 @@ asm("  .section .version\n"
 #warning BAUD_RATE error greater than -2%
 #endif
 
-#if 0
-/* Switch in soft UART for hard baud rates */
-/*
- * I don't understand what this was supposed to accomplish, where the
- * constant "280" came from, or why automatically (and perhaps unexpectedly)
- * switching to a soft uart is a good thing, so I'm undoing this in favor
- * of a range check using the same calc used to config the BRG...
- */
-#if (F_CPU/BAUD_RATE) > 280 // > 57600 for 16MHz
-#ifndef SOFT_UART
-#define SOFT_UART
-#endif
-#endif
-#else // 0
 #if (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 > 250
 #error Unachievable baud rate (too slow) BAUD_RATE
 #endif // baud rate slow check
 #if (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 < 3
 #error Unachievable baud rate (too fast) BAUD_RATE
 #endif // baud rate fastn check
-#endif
 
 /* Watchdog settings */
 #define WATCHDOG_OFF    (0)
@@ -317,16 +304,10 @@ static inline void led2();
 uint8_t getLen();
 static inline void watchdogReset();
 void watchdogConfig(uint8_t x);
-#ifdef SOFT_UART
-void uartDelay() __attribute__ ((naked));
-#endif
 void wait_timeout(void) __attribute__ ((__noreturn__));
 void appStart(uint8_t rstFlags) __attribute__ ((naked))  __attribute__ ((__noreturn__));
-#ifdef RADIO_UART
 static int radio_init(void);
-#endif
 
-#ifdef RADIO_UART
 static uint8_t radio_mode = 0;
 static uint8_t radio_present = 0;
 static uint8_t pkt_max_len = 32;
@@ -340,7 +321,6 @@ static uint8_t pkt_max_len = 32;
 
 #include "spi.h"
 #include "nrf24.h"
-#endif
 
 /*
  * NRWW memory
@@ -384,20 +364,12 @@ static uint8_t pkt_max_len = 32;
 #endif
 
 // TODO: get actual .bss+.data size from GCC
-#ifdef RADIO_UART
 #define BSS_SIZE	0x80
-#else
-#define BSS_SIZE	0
-#endif
 
 /* C zero initialises all global variables. However, that requires */
 /* These definitions are NOT zero initialised, but that doesn't matter */
 /* This allows us to drop the zero init code, saving us memory */
 #define buff    ((uint8_t*)(RAMSTART+BSS_SIZE))
-#ifdef VIRTUAL_BOOT_PARTITION
-#define rstVect (*(uint16_t*)(RAMSTART+BSS_SIZE+SPM_PAGESIZE*2+4))
-#define wdtVect (*(uint16_t*)(RAMSTART+BSS_SIZE+SPM_PAGESIZE*2+6))
-#endif
 
 /*
  * Handle devices with up to 4 uarts (eg m1280.)  Rather inelegantly.
@@ -555,7 +527,6 @@ int main(void) {
    */
   DDRD |= 3;
   PORTD &= ~3;
-#ifndef SOFT_UART
 #if defined(__AVR_ATmega8__) || defined (__AVR_ATmega32__)
   UCSRA = _BV(U2X); //Double speed mode USART
   UCSRB = _BV(RXEN) | _BV(TXEN);  // enable Rx & Tx
@@ -567,7 +538,6 @@ int main(void) {
   UART_SRC = _BV(UCSZ00) | _BV(UCSZ01);
   UART_SRL = (uint8_t)( (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 );
 #endif
-#endif
 
   // Set up watchdog to trigger after 500ms
   watchdogConfig(WATCHDOG_4S);
@@ -578,46 +548,15 @@ int main(void) {
   LED_DDR |= _BV(LED2);
 #endif
 
-#ifdef SOFT_UART
-  /* Set TX pin as output */
-  UART_DDR |= _BV(UART_TX_BIT);
-#endif
-
-#ifdef RADIO_UART
   flash_led(2);
   if (!radio_init()) {
     while (1);
   }
-#endif
 
 
 #if LED_START_FLASHES > 0
   /* Flash onboard LED to signal entering of bootloader */
   flash_led(LED_START_FLASHES * 2);
-#endif
-
-#if 0
-  static uint8_t pkt_len = 0;
-  static uint8_t pkt_buf[32];
-  // while (nrf24_rx_fifo_data()) {
-  //   nrf24_rx_read(pkt_buf, &pkt_len);
-  // }
-
-  pkt_buf[0] = 'h';
-  pkt_buf[1] = 'e';
-  pkt_buf[2] = 'l';
-  pkt_buf[3] = 'l';
-  pkt_buf[4] = 'o';
-  for (;;) {
-    nrf24_tx(pkt_buf, 5);
-    nrf24_tx_result_wait();
-    if (nrf24_rx_fifo_data()) {
-      nrf24_rx_read(pkt_buf, &pkt_len);
-    }
-    my_delay(5);
-    watchdogReset();
-    //flash_led(1);
-  }
 #endif
 
   /* Forever loop */
@@ -708,25 +647,6 @@ int main(void) {
         // So check that here
         boot_spm_busy_wait();
 
-#ifdef VIRTUAL_BOOT_PARTITION
-        if ((uint16_t)(void*)address == 0) {
-          // This is the reset vector page. We need to live-patch the code so the
-          // bootloader runs.
-          //
-          // Move RESET vector to WDT vector
-          uint16_t vect = buff[0] | (buff[1]<<8);
-          rstVect = vect;
-          wdtVect = buff[8] | (buff[9]<<8);
-          vect -= 4; // Instruction is a relative jump (rjmp), so recalculate.
-          buff[8] = vect & 0xff;
-          buff[9] = vect >> 8;
-
-          // Add jump to bootloader at RESET vector
-          buff[0] = 0x7f;
-          buff[1] = 0xce; // rjmp 0x1d00 instruction
-        }
-#endif
-
         // Copy buffer into programming buffer
         bufPtr = buff;
         addrPtr = (uint16_t)(void*)address;
@@ -777,15 +697,7 @@ int main(void) {
       if (type == 'F')
 #endif
         do {
-#ifdef VIRTUAL_BOOT_PARTITION
-          // Undo vector patch in bottom page so verify passes
-          if (address == 0)       ch=rstVect & 0xff;
-          else if (address == 1)  ch=rstVect >> 8;
-          else if (address == 8)  ch=wdtVect & 0xff;
-          else if (address == 9) ch=wdtVect >> 8;
-          else ch = pgm_read_byte_near(address);
-          address++;
-#elif defined(RAMPZ)
+#if defined(RAMPZ)
           // Since RAMPZ should already be set, we need to use EPLM directly.
           // Also, we can use the autoincrement version of lpm to update "address"
           //      do putch(pgm_read_byte_near(address++));
@@ -826,7 +738,6 @@ int main(void) {
   }
 }
 
-#ifdef RADIO_UART
 /*
  * Radio mode gets set the moment we receive any command over the radio chip.
  * From that point our responses will also be sent through the radio instead
@@ -838,8 +749,6 @@ int main(void) {
  * we'd encrypt all communication but that would be an overkill for the
  * bootloader.
  */
-
-#define SEQN
 
 static int radio_init(void) {
   uint8_t addr[5];
@@ -876,10 +785,8 @@ static int radio_init(void) {
   nrf24_rx_mode();
   return 1;
 }
-#endif
 
 void putch(char ch) {
-#ifdef RADIO_UART
   if (radio_mode) {
     static uint8_t pkt_len = 0;
     static uint8_t pkt_buf[32];
@@ -887,7 +794,6 @@ void putch(char ch) {
     pkt_buf[pkt_len++] = ch;
 
     if (ch == STK_OK || pkt_len == pkt_max_len) {
-#ifdef SEQN
       uint8_t cnt = 128;
 
       while (--cnt) {
@@ -910,61 +816,19 @@ void putch(char ch) {
 
       pkt_len = 1;
       pkt_buf[0] ++;
-#else
-      // /* Wait 4ms to allow the remote end to switch to Rx mode */
-      my_delay(4);
-      uint8_t cnt = 5;
-      while (--cnt) {
-          nrf24_tx(pkt_buf, pkt_len);
-          if (nrf24_tx_result_wait() < 0) {
-            my_delay(4);
-            continue;
-          }
-          break;
-      }
-
-      pkt_len = 0;
-#endif
     }
 
     return;
   }
-#endif
-#ifndef SOFT_UART
+
   while (!(UART_SRA & _BV(UDRE0)));
   UART_UDR = ch;
-#else
-  __asm__ __volatile__ (
-    "   com %[ch]\n" // ones complement, carry set
-    "   sec\n"
-    "1: brcc 2f\n"
-    "   cbi %[uartPort],%[uartBit]\n"
-    "   rjmp 3f\n"
-    "2: sbi %[uartPort],%[uartBit]\n"
-    "   nop\n"
-    "3: rcall uartDelay\n"
-    "   rcall uartDelay\n"
-    "   lsr %[ch]\n"
-    "   dec %[bitcnt]\n"
-    "   brne 1b\n"
-    :
-    :
-      [bitcnt] "d" (10),
-      [ch] "r" (ch),
-      [uartPort] "I" (_SFR_IO_ADDR(UART_PORT)),
-      [uartBit] "I" (UART_TX_BIT)
-    :
-      "r25"
-  );
-#endif
 }
 
 uint8_t getch(void) {
   uint8_t ch;
-#ifdef RADIO_UART
   static uint8_t pkt_len = 0, pkt_start = 0;
   static uint8_t pkt_buf[32];
-#endif
 
 #ifdef LED_DATA_FLASH
 #if defined(__AVR_ATmega8__) || defined (__AVR_ATmega32__)
@@ -974,31 +838,6 @@ uint8_t getch(void) {
 #endif
 #endif
 
-#ifdef SOFT_UART
-  __asm__ __volatile__ (
-    "1: sbic  %[uartPin],%[uartBit]\n"  // Wait for start edge
-    "   rjmp  1b\n"
-    "   rcall uartDelay\n"          // Get to middle of start bit
-    "2: rcall uartDelay\n"              // Wait 1 bit period
-    "   rcall uartDelay\n"              // Wait 1 bit period
-    "   clc\n"
-    "   sbic  %[uartPin],%[uartBit]\n"
-    "   sec\n"
-    "   dec   %[bitCnt]\n"
-    "   breq  3f\n"
-    "   ror   %[ch]\n"
-    "   rjmp  2b\n"
-    "3:\n"
-    :
-      [ch] "=r" (ch)
-    :
-      [bitCnt] "d" (9),
-      [uartPin] "I" (_SFR_IO_ADDR(UART_PIN)),
-      [uartBit] "I" (UART_RX_BIT)
-    :
-      "r25"
-);
-#else
   while(1) {
     if (UART_SRA & _BV(RXC0)) {
       if (!(UART_SRA & _BV(FE0))) {
@@ -1017,19 +856,13 @@ uint8_t getch(void) {
       break;
     }
 
-#ifdef RADIO_UART
     if (radio_present && (pkt_len || nrf24_rx_fifo_data())) {
       watchdogReset();
 
       if (!pkt_len) {
-#ifdef SEQN
         static uint8_t seqn = 0xff;
-#define START 1
-#else
-#define START 0
-#endif
         nrf24_rx_read(pkt_buf, &pkt_len);
-        pkt_start = START;
+        pkt_start = 1;
         radio_mode = 1;
 
         #if 0
@@ -1052,7 +885,6 @@ uint8_t getch(void) {
         if (!pkt_len)
           continue;
 
-#ifdef SEQN
         if (pkt_buf[0] == seqn) {
           pkt_len = 0;
           continue;
@@ -1060,16 +892,13 @@ uint8_t getch(void) {
 
         seqn = pkt_buf[0];
         pkt_len--;
-#endif
       }
 
       ch = pkt_buf[pkt_start ++];
       pkt_len --;
       break;
     }
-#endif
   }
-#endif
 
 #ifdef LED_DATA_FLASH
 #if defined(__AVR_ATmega8__) || defined (__AVR_ATmega32__)
@@ -1082,34 +911,13 @@ uint8_t getch(void) {
   return ch;
 }
 
-#ifdef SOFT_UART
-// AVR305 equation: #define UART_B_VALUE (((F_CPU/BAUD_RATE)-23)/6)
-// Adding 3 to numerator simulates nearest rounding for more accurate baud rates
-#define UART_B_VALUE (((F_CPU/BAUD_RATE)-20)/6)
-#if UART_B_VALUE > 255
-#error Baud rate too slow for soft UART
-#endif
-
-void uartDelay() {
-  __asm__ __volatile__ (
-    "ldi r25,%[count]\n"
-    "1:dec r25\n"
-    "brne 1b\n"
-    "ret\n"
-    ::[count] "M" (UART_B_VALUE)
-  );
-}
-#endif
-
 void getNch(uint8_t count) {
   do getch(); while (--count);
   verifySpace();
 }
 
 void wait_timeout(void) {
-#ifdef RADIO_UART
   nrf24_idle_mode(0);		      // power the radio off
-#endif
   watchdogConfig(WATCHDOG_16MS);      // shorten WD timeout
   while (1)			      // and busy-loop so that WD causes
     ;				      //  a reset and app start.
@@ -1170,15 +978,9 @@ void appStart(uint8_t rstFlags) {
   __asm__ __volatile__ ("mov r2, %0\n" :: "r" (rstFlags));
 
   __asm__ __volatile__ (
-#ifdef VIRTUAL_BOOT_PARTITION
-    // Jump to WDT vector
-    "ldi r30,4\n"
-    "clr r31\n"
-#else
     // Jump to RST vector
     "clr r30\n"
     "clr r31\n"
-#endif
     "ijmp\n"
   );
 }
