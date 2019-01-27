@@ -555,6 +555,7 @@ int main(void) {
 
     /* get character from UART */
     ch = getch();
+    marker = 0;
 
     if(ch == STK_GET_PARAMETER) {
       unsigned char which = getch();
@@ -718,6 +719,7 @@ int main(void) {
     }
     else if (ch == STK_LEAVE_PROGMODE) { /* 'Q' */
       // Adaboot no-wait mod
+      marker = 0xdeadbeef;
       watchdogConfig(WATCHDOG_16MS);
       verifySpace();
     }
