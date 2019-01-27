@@ -216,14 +216,7 @@ asm("  .section .version\n"
 #include <avr/io.h>
 #include <avr/pgmspace.h>
 #include <avr/eeprom.h>
-
-// <avr/boot.h> uses sts instructions, but this version uses out instructions
-// This saves cycles and program memory.
 #include "boot.h"
-
-
-// We don't use <avr/wdt.h> as those routines have interrupt overhead we don't need.
-
 #include "pin_defs.h"
 #include "stk500.h"
 
@@ -299,7 +292,6 @@ static inline void getNch(uint8_t); /* "static inline" is a compiler hint to red
 void verifySpace();
 #if LED_START_FLASHES > 0
 static inline void flash_led(uint8_t);
-static inline void led2();
 #endif
 uint8_t getLen();
 static inline void watchdogReset();
@@ -539,13 +531,12 @@ int main(void) {
   UART_SRL = (uint8_t)( (F_CPU + BAUD_RATE * 4L) / (BAUD_RATE * 8L) - 1 );
 #endif
 
-  // Set up watchdog to trigger after 500ms
-  watchdogConfig(WATCHDOG_4S);
+  // Set up watchdog to trigger after 2s
+  watchdogConfig(WATCHDOG_2S);
 
 #if (LED_START_FLASHES > 0) || defined(LED_DATA_FLASH)
   /* Set LED pin as output */
   LED_DDR |= _BV(LED);
-  LED_DDR |= _BV(LED2);
 #endif
 
   flash_led(2);
@@ -615,6 +606,7 @@ int main(void) {
       uint8_t *bufPtr;
       uint16_t addrPtr;
       uint8_t type;
+
       getch();			/* getlen() */
       length = getch();
       type = getch();
@@ -629,7 +621,6 @@ int main(void) {
       bufPtr = buff;
       do *bufPtr++ = getch();
       while (--length);
-
 
 #ifdef SUPPORT_EEPROM
       if (type == 'F') {	/* Flash */
@@ -763,18 +754,13 @@ static int radio_init(void) {
   if (!radio_present)
     return 0;
 
-  /*
-   * Set our own address.
-   *
-   * The remote end's address will be set according to the contents
-   * of the first packet we receive from the master.
-   */
   addr[0] = 0x02;
   addr[1] = 0x02;
   addr[2] = 0x02;
   addr[3] = 0x02;
   addr[4] = 0x02;
   nrf24_set_rx_addr(addr);
+
   addr[0] = 0x01;
   addr[1] = 0x01;
   addr[2] = 0x01;
@@ -787,42 +773,36 @@ static int radio_init(void) {
 }
 
 void putch(char ch) {
-  if (radio_mode) {
-    static uint8_t pkt_len = 0;
-    static uint8_t pkt_buf[32];
+  static uint8_t pkt_len = 0;
+  static uint8_t pkt_buf[32];
 
-    pkt_buf[pkt_len++] = ch;
+  pkt_buf[pkt_len++] = ch;
 
-    if (ch == STK_OK || pkt_len == pkt_max_len) {
-      uint8_t cnt = 128;
+  if (ch == STK_OK || pkt_len == pkt_max_len) {
+    uint8_t cnt = 128;
 
-      while (--cnt) {
-        /* Wait 4ms to allow the remote end to switch to Rx mode */
-        my_delay(4);
+    while (--cnt) {
+      /* Wait 4ms to allow the remote end to switch to Rx mode */
+      my_delay(4);
 
-        nrf24_tx(pkt_buf, pkt_len);
-        if (!nrf24_tx_result_wait())
-          break;
+      nrf24_tx(pkt_buf, pkt_len);
+      if (!nrf24_tx_result_wait())
+        break;
 
-        /*
-        * TODO: also check if there's anything in the Rx FIFO - that
-        * would indicate that the other side has actually received our
-        * packet but the ACK may have been lost instead.  In any case
-        * the other side is not listening for what we're re-sending,
-        * maybe has given up and is resending the full command which
-        * is ok.
-        */
-      }
-
-      pkt_len = 1;
-      pkt_buf[0] ++;
+      /*
+      * TODO: also check if there's anything in the Rx FIFO - that
+      * would indicate that the other side has actually received our
+      * packet but the ACK may have been lost instead.  In any case
+      * the other side is not listening for what we're re-sending,
+      * maybe has given up and is resending the full command which
+      * is ok.
+      */
     }
 
-    return;
+    pkt_len = 1;
+    pkt_buf[0] ++;
   }
 
-  while (!(UART_SRA & _BV(UDRE0)));
-  UART_UDR = ch;
 }
 
 uint8_t getch(void) {
@@ -830,57 +810,15 @@ uint8_t getch(void) {
   static uint8_t pkt_len = 0, pkt_start = 0;
   static uint8_t pkt_buf[32];
 
-#ifdef LED_DATA_FLASH
-#if defined(__AVR_ATmega8__) || defined (__AVR_ATmega32__)
-  LED_PORT ^= _BV(LED);
-#else
-  LED_PIN |= _BV(LED);
-#endif
-#endif
 
   while(1) {
-    if (UART_SRA & _BV(RXC0)) {
-      if (!(UART_SRA & _BV(FE0))) {
-        /*
-         * A Framing Error indicates (probably) that something is talking
-         * to us at the wrong bit rate.  Assume that this is because it
-         * expects to be talking to the application, and DON'T reset the
-         * watchdog.  This should cause the bootloader to abort and run
-         * the application "soon", if it keeps happening.  (Note that we
-         * don't care that an invalid char is returned...)
-         */
-        watchdogReset();
-      }
-
-      ch = UART_UDR;
-      break;
-    }
-
-    if (radio_present && (pkt_len || nrf24_rx_fifo_data())) {
-      watchdogReset();
+    if (pkt_len || nrf24_rx_fifo_data()) {
 
       if (!pkt_len) {
         static uint8_t seqn = 0xff;
+        watchdogReset();
         nrf24_rx_read(pkt_buf, &pkt_len);
         pkt_start = 1;
-        radio_mode = 1;
-
-        #if 0
-        if (0 && !radio_mode && pkt_len >= 4) {
-        //if (!radio_mode && pkt_len >= 4) {
-          /*
-           * If this is the first packet we receive, the first three bytes
-           * should contain the sender's address.
-           */
-          nrf24_set_tx_addr(pkt_buf);
-          pkt_max_len = pkt_buf[3];
-          pkt_len -= 4;
-          pkt_start += 4;
-
-          radio_mode = 1;
-        } else if (!radio_mode)
-          pkt_len = 0;
-        #endif
 
         if (!pkt_len)
           continue;
@@ -899,14 +837,6 @@ uint8_t getch(void) {
       break;
     }
   }
-
-#ifdef LED_DATA_FLASH
-#if defined(__AVR_ATmega8__) || defined (__AVR_ATmega32__)
-  LED_PORT ^= _BV(LED);
-#else
-  LED_PIN |= _BV(LED);
-#endif
-#endif
 
   return ch;
 }
@@ -944,13 +874,6 @@ void flash_led(uint8_t count) {
   } while (--count);
 }
 
-void led2() {
-#if defined(__AVR_ATmega8__)  || defined (__AVR_ATmega32__)
-    LED_PORT ^= _BV(LED2);
-#else
-    LED_PIN |= _BV(LED2);
-#endif
-}
 #endif
 
 // Watchdog functions. These are only safe with interrupts turned off.
@@ -966,11 +889,7 @@ void watchdogConfig(uint8_t x) {
 }
 
 void appStart(uint8_t rstFlags) {
-#ifdef FORCE_WATCHDOG
-  watchdogConfig(WATCHDOG_4S);
-#else
   watchdogConfig(WATCHDOG_OFF);
-#endif
 
   // save the reset flags in the designated register
   //  This can be saved in a main program by putting code in .init0 (which
