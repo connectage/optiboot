@@ -775,13 +775,14 @@ static int radio_init(void) {
 }
 
 void putch(char ch) {
-  static uint8_t pkt_len = 0;
+  static uint8_t pkt_len = 1;
   static uint8_t pkt_buf[32];
 
   pkt_buf[pkt_len++] = ch;
 
   if (ch == STK_OK || pkt_len == pkt_max_len) {
     uint8_t cnt = 128;
+    pkt_buf[0] = 0;
 
     while (--cnt) {
       /* Wait 4ms to allow the remote end to switch to Rx mode */
@@ -811,7 +812,6 @@ uint8_t getch(void) {
   uint8_t ch;
   static uint8_t pkt_len = 0, pkt_start = 0;
   static uint8_t pkt_buf[32];
-
 
   while(1) {
     if (pkt_len || nrf24_rx_fifo_data()) {
